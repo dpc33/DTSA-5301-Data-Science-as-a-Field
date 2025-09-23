@@ -6,6 +6,10 @@ date: "9/11/2025"
 
 # NYPD Shooting Data Analysis 
 
+- Data Description: This is a breakdown of every shooting incident that occurred in NYC going back to 2006 through the end of the previous calendar year. This data is manually extracted every quarter and reviewed by the Office of Management Analysis and Planning before being posted on the NYPD website. Each record represents a shooting incident in NYC and includes information about the event, the location and time of occurrence. In addition, information related to suspect and victim demographics is also included. 
+
+- Purpose: The goal of this analysis is to explore the NYPD shooting data to identify trends, patterns, and potential areas of concern which may lead to positive public policy changes. 
+
 ### Import Libraries
 ```{r setup, message=FALSE, warning=FALSE}
 library(dplyr)
@@ -17,7 +21,7 @@ library(forecast)
 ### Read Data and Check Summary
 ```{r}
 # read in data 
-shooting_data = read.csv("m:/MSDS/DTSA5301/NYPD_Shooting_Incident_Data__Historic_.csv")
+shooting_data = read.csv("https://data.cityofnewyork.us/api/views/833y-fsy8/rows.csv?accessType=DOWNLOAD")
 head(shooting_data)
 summary(shooting_data)
 ```
@@ -194,3 +198,4 @@ The analysis of the NYPD shooting data from 2006 to 2024 reveals several key ins
 The time series forecast model (ARIMA) suggests the number of shootings to rise slightly over the next 5 years, however, the confidence intervals are quite wide, indicating a high level of uncertainty in the predictions. Significantly more time should be spent to evaluate model fit and other potential models.
 The racial distribution of perpetrators and victims shows significant disparities, with certain racial groups being disproportionately represented. There is a significant number of shootings with unknown or unlisted racial group (around 30%-50%). Black and Hispanic individuals are more frequently involved as both perpetrators and victims compared to their population proportions. The analysis of race on race proportion of total shootings suggests that Black on Black and Unknown Race on Black are make up 64% of all shootings from 2006-2024.
 These disparities may reflect underlying social, economic, and systemic issues that need to be addressed. It is important to consider potential biases in the data collection process, such as underreporting or misclassification. Significantly deeper dives into this data are needed to draw more definitive conclusions.
+It may also be of benefit to consider analyst bias in the selection of columns for study. Age group, sex, time of day, precinct, etc. may all have interactive effects that should be considered along with the factors analyzed.
