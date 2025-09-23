@@ -1,0 +1,196 @@
+---
+title: "Assignment 1 - DTSA 5301"
+output: html_document
+date: "9/11/2025"
+---
+
+# NYPD Shooting Data Analysis 
+
+### Import Libraries
+```{r setup, message=FALSE, warning=FALSE}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(leaflet) 
+library(forecast)
+```
+### Read Data and Check Summary
+```{r}
+# read in data 
+shooting_data = read.csv("m:/MSDS/DTSA5301/NYPD_Shooting_Incident_Data__Historic_.csv")
+head(shooting_data)
+summary(shooting_data)
+```
+### Drop Null Values where all Columns Null or Date is Null 
+```{r}
+# check nulls in each column and drop nulls
+colSums(is.na(shooting_data))
+# Only drop rows where ALL columns are NA
+shooting_data <- shooting_data %>%
+dplyr::filter(!dplyr::if_all(dplyr::everything(), is.na))
+
+# Drop rows only if key columns are NA
+shooting_data <- tidyr::drop_na(shooting_data, OCCUR_DATE)
+```
+### Convert Date Column to Date Format and Check Data Types
+```{r}
+# convert date column to date format and check data types 
+shooting_data$OCCUR_DATE = as.Date(shooting_data$OCCUR_DATE, format="%m/%d/%Y")
+str(shooting_data)
+summary(shooting_data)
+```
+### Plot Time Series of Total Shootings Per Year and Perform Arima Time Series Forecast Model 
+```{r}
+# begin with time series plot of total shootings per year
+shooting_data = shooting_data %>%
+  mutate(year = format(OCCUR_DATE, "%Y"))
+yearly_shootings = shooting_data %>%
+    group_by(year) %>%
+    summarise(total_shootings = n())
+ggplot(yearly_shootings, aes(x=year, y=total_shootings, group=1)) +
+  geom_line() +
+  geom_point() +
+  labs(title="Total Shootings per Year", x="Year", y="Total Shootings")
+```
+```{r}
+# Time series forecast of shootings
+# Prepare data for time series analysis
+yearly_shootings <- shooting_data %>%
+  mutate(year = as.integer(format(OCCUR_DATE, "%Y"))) %>%
+  count(year, name = "total_shootings") %>%
+  arrange(year)
+
+# Create time series
+shooting_ts <- ts(yearly_shootings$total_shootings,
+                  start = min(yearly_shootings$year),
+                  frequency = 1)
+
+# Fit ARIMA
+fit <- auto.arima(shooting_ts)
+
+# Forecast next 5 years
+forecasted <- forecast(fit, h = 5)
+
+# Plot forecast
+autoplot(forecasted) +
+  labs(title = "Forecast of Shootings in NYC",
+       x = "Year",
+       y = "Number of Shootings")
+```
+### Map Shootings Overall
+```{r}
+# plot shootings on a map using leaflet
+shooting_pts <- shooting_data |>
+  filter(!is.na(Longitude), !is.na(Latitude), Longitude != 0, Latitude != 0)
+
+leaflet(shooting_pts) |>
+  addTiles() |>
+  addCircleMarkers(lng = ~Longitude, lat = ~Latitude,
+                   radius = 3, stroke = FALSE,
+                   fillOpacity = 0.5, color = ~year) 
+```
+### Analyze Racial Distribution of Perpetrators and Victims as well as Combination 
+```{r}
+# check unique values of PERP_RACE column and unique values of VIC_RACE column
+unique(shooting_data$PERP_RACE)
+unique(shooting_data$VIC_RACE)
+```
+```{r}
+# create table to show percentage of shootings by year for racial groups as defined by PERP_RACE column
+# Clean race values (so that NA, empty, and "(null)" are treated as "UNKNOWN")
+shooting_data <- shooting_data %>%
+  mutate(PERP_RACE = ifelse(is.na(PERP_RACE) | PERP_RACE == "" | PERP_RACE == "(null)",
+                            "UNKNOWN", PERP_RACE))
+
+# Compute percentage of shootings by perpetrator race per year
+shooting_percentage <- shooting_data %>%
+  group_by(year, PERP_RACE) %>%
+  summarise(count = n(), .groups = "drop_last") %>%
+  mutate(pct = 100 * count / sum(count)) %>%
+  ungroup() %>%
+  select(year, PERP_RACE, pct) %>%
+  tidyr::pivot_wider(names_from = PERP_RACE,
+                     values_from = pct,
+                     values_fill = 0) %>%
+  arrange(year)
+
+# Round for display
+shooting_percentage_display <- shooting_percentage %>%
+  mutate(across(-year, ~round(.x, 1)))
+
+# Display as a table
+if (requireNamespace("knitr", quietly = TRUE)) {
+  knitr::kable(shooting_percentage_display,
+               caption = "Percentage of Shootings by Perpetrator Race per Year")
+} else {
+  shooting_percentage_display
+}
+```
+```{r}
+# create table to show percentage of victims by year for racial groups as defined by VIC_RACE column
+# Clean race values (so that NA, empty, and "(null)" are treated as "UNKNOWN")
+shooting_data <- shooting_data %>%
+  mutate(VIC_RACE = ifelse(is.na(VIC_RACE) | VIC_RACE == "" | VIC_RACE == "(null)",
+                            "UNKNOWN", VIC_RACE))
+
+# Compute percentage of shootings by victim race per year
+shooting_percentage <- shooting_data %>%
+  group_by(year, VIC_RACE) %>%
+  summarise(count = n(), .groups = "drop_last") %>%
+  mutate(pct = 100 * count / sum(count)) %>%
+  ungroup() %>%
+  select(year, VIC_RACE, pct) %>%
+  tidyr::pivot_wider(names_from = VIC_RACE,
+                     values_from = pct,
+                     values_fill = 0) %>%
+  arrange(year)
+
+# Round for display
+shooting_percentage_display <- shooting_percentage %>%
+  mutate(across(-year, ~round(.x, 1)))
+
+# Display as a table
+if (requireNamespace("knitr", quietly = TRUE)) {
+  knitr::kable(shooting_percentage_display,
+               caption = "Percentage of Shootings by Victim Race per Year")
+} else {
+  shooting_percentage_display
+}
+```
+```{r}
+# Perp-victim matrix: cells are % of ALL shootings (table sums to 100%)
+tot_shootings <- nrow(shooting_data)
+
+shooting_matrix_overall <- shooting_data %>%
+  count(PERP_RACE, VIC_RACE, name = "count") %>%
+  mutate(pct = 100 * count / tot_shootings) %>%
+  select(PERP_RACE, VIC_RACE, pct) %>%
+  tidyr::pivot_wider(names_from = VIC_RACE,
+                     values_from = pct,
+                     values_fill = 0) %>%
+  arrange(PERP_RACE)
+
+# Add a row total (% of all shootings by perpetrator race)
+shooting_matrix_overall <- shooting_matrix_overall %>%
+  mutate(`ROW_TOTAL_%` = round(rowSums(across(-PERP_RACE)), 1))
+
+# Check should be ~100
+grand_total_check <- sum(shooting_matrix_overall$`ROW_TOTAL_%`)
+
+shooting_matrix_overall_display <- shooting_matrix_overall %>%
+  mutate(across(-PERP_RACE, ~round(.x, 2)))
+
+if (requireNamespace("knitr", quietly = TRUE)) {
+  knitr::kable(shooting_matrix_overall_display,
+               caption = paste0("Perp-Victim Race: % of All Shootings (Grand Total ~ ",
+                                round(grand_total_check,1), "%)"))
+} else {
+  shooting_matrix_overall_display
+}
+```
+# Conclusions, Bias, and Next Steps:
+
+The analysis of the NYPD shooting data from 2006 to 2024 reveals several key insights. The amount of shootings was consistently declining through 2018 with a large uptick in 2020. A deeper analysis needs to be conducted on the factors contributing to this trend, however it does coincide with when Covid-19 lockdowns began in NYC.
+The time series forecast model (ARIMA) suggests the number of shootings to rise slightly over the next 5 years, however, the confidence intervals are quite wide, indicating a high level of uncertainty in the predictions. Significantly more time should be spent to evaluate model fit and other potential models.
+The racial distribution of perpetrators and victims shows significant disparities, with certain racial groups being disproportionately represented. There is a significant number of shootings with unknown or unlisted racial group (around 30%-50%). Black and Hispanic individuals are more frequently involved as both perpetrators and victims compared to their population proportions. The analysis of race on race proportion of total shootings suggests that Black on Black and Unknown Race on Black are make up 64% of all shootings from 2006-2024.
+These disparities may reflect underlying social, economic, and systemic issues that need to be addressed. It is important to consider potential biases in the data collection process, such as underreporting or misclassification. Significantly deeper dives into this data are needed to draw more definitive conclusions.
