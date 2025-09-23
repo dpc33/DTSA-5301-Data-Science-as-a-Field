@@ -1,201 +1,325 @@
 ---
-title: "Assignment 1 - DTSA 5301"
+title: "Assignment 2 - DTSA 5301"
 output: html_document
-date: "9/11/2025"
+date: "9/17/2025"
 ---
 
-# NYPD Shooting Data Analysis 
+# COVID 19 Data Analysis 2020 - 2023
+The purpose of this analysis is to explore and analyize the COVID 19 case and death data as publised by Johns Hopkins University. The data is daily time series data globally for both confirmed cases as well as deaths. Additionally, population data from the US Census Bureau was brought in, in order to calculated deaths and cases per 100k.
 
-- Data Description: This is a breakdown of every shooting incident that occurred in NYC going back to 2006 through the end of the previous calendar year. This data is manually extracted every quarter and reviewed by the Office of Management Analysis and Planning before being posted on the NYPD website. Each record represents a shooting incident in NYC and includes information about the event, the location and time of occurrence. In addition, information related to suspect and victim demographics is also included. 
-
-- Purpose: The goal of this analysis is to explore the NYPD shooting data to identify trends, patterns, and potential areas of concern which may lead to positive public policy changes. 
+### Data Sources
+- Johns Hopkins University CSSEGISandData COVID-19 Repository
+- United States Census Bureau for population Data 
 
 ### Import Libraries
 ```{r setup, message=FALSE, warning=FALSE}
 library(dplyr)
 library(tidyr)
+library(lubridate)
 library(ggplot2)
 library(leaflet) 
 library(forecast)
+library(xgboost)
+library(SHAPforxgboost)
 ```
-### Read Data and Check Summary
+
+### Read Data and Check Data Types
 ```{r}
 # read in data 
-shooting_data = read.csv("https://data.cityofnewyork.us/api/views/833y-fsy8/rows.csv?accessType=DOWNLOAD")
-head(shooting_data)
-summary(shooting_data)
+# note for reproducibility, the links have been included but commented out 
+# during the iterative analysis, a local download was used for convenience 
+#case_data = read.csv("https://github.com/CSSEGISandData/COVID-19/blob/master/csse_covid_19_data/csse_covid_19_time_series/time_series_covid19_confirmed_global.csv")
+case_data = read.csv("M:/MSDS/DTSA5301/time_series_covid19_confirmed_global.csv")
+#death_data = read.csv("https://github.com/CSSEGISandData/COVID-19/blob/master/csse_covid_19_data/csse_covid_19_time_series/time_series_covid19_deaths_global.csv")
+death_data = read.csv("M:/MSDS/DTSA5301/time_series_covid19_deaths_global.csv")
+population_data = read.csv("m:/MSDS/DTSA5301/2025_Population_byCountry.csv") 
+# note this data must be downloaded from table on census.gov website: https://www.census.gov/data-tools/demo/idb/#/table?dashboard_page=country&COUNTRY_YR_ANIM=2025
+str(case_data)
+str(death_data)
+str(population_data)
 ```
-### Drop Null Values where all Columns Null or Date is Null 
-```{r}
-# check nulls in each column and drop nulls
-colSums(is.na(shooting_data))
-# Only drop rows where ALL columns are NA
-shooting_data <- shooting_data %>%
-dplyr::filter(!dplyr::if_all(dplyr::everything(), is.na))
 
-# Drop rows only if key columns are NA
-shooting_data <- tidyr::drop_na(shooting_data, OCCUR_DATE)
-```
-### Convert Date Column to Date Format and Check Data Types
+### Drop Province/State Column if Present 
 ```{r}
-# convert date column to date format and check data types 
-shooting_data$OCCUR_DATE = as.Date(shooting_data$OCCUR_DATE, format="%m/%d/%Y")
-str(shooting_data)
-summary(shooting_data)
-```
-### Plot Time Series of Total Shootings Per Year and Perform Arima Time Series Forecast Model 
+# Drop Province/State column if present (not needed for country-level analysis)
+if ("Province.State" %in% colnames(case_data)) {
+  case_data <- case_data %>% select(-Province.State)
+}
+if ("Province.State" %in% colnames(death_data)) {
+  death_data <- death_data %>% select(-Province.State)
+}
+``` 
+
+### Check Nulls 
 ```{r}
-# begin with time series plot of total shootings per year
-shooting_data = shooting_data %>%
-  mutate(year = format(OCCUR_DATE, "%Y"))
-yearly_shootings = shooting_data %>%
-    group_by(year) %>%
-    summarise(total_shootings = n())
-ggplot(yearly_shootings, aes(x=year, y=total_shootings, group=1)) +
+# check total nulls in each dataframe
+sum(is.na(case_data))
+sum(is.na(death_data))
+sum(is.na(population_data))
+```
+
+### Pivot Wide Format to Long, Convert Dates to Date Format, Group by Country
+```{r}
+# Columns 1:4 are identifiers in JHU data (Province/State, Country/Region, Lat, Long)
+case_long <- case_data %>%
+  pivot_longer(
+    cols = -(1:4),
+    names_to = "Date",
+    values_to = "Cases"
+  ) %>% 
+  mutate(Date = sub("^X","", Date),
+         Date = mdy(Date))  # Remove leading 'X' from date column names
+death_long <- death_data %>%
+  pivot_longer(
+    cols = -(1:4),
+    names_to = "Date",
+    values_to = "Deaths"
+  ) %>% 
+  mutate(Date = sub("^X","", Date),
+         Date = mdy(Date))  # Remove leading 'X' from date column names
+
+# Group by country level
+case_country <- case_long %>%
+  group_by(`Country.Region` = `Country.Region`, Date) %>%
+  summarise(Cases = sum(Cases), .groups = "drop")
+
+death_country <- death_long %>%
+  group_by(`Country.Region` = `Country.Region`, Date) %>%
+  summarise(Deaths = sum(Deaths), .groups = "drop")
+
+# Merge cases and deaths
+covid_country <- case_country %>%
+  left_join(death_country, by = c("Country.Region", "Date"))
+
+head(covid_country)
+```
+
+### Merge Population Data and Calculate Cumulative Cases and Deaths per 100K
+```{r}
+# Clean population column: remove non-digits, convert to numeric
+population_data <- population_data %>% 
+  mutate(Total.Population = gsub("[^0-9.]", "", Total.Population),
+         Total.Population = as.numeric(Total.Population))
+
+# Merge population data
+covid_country <- covid_country %>%
+  left_join(population_data, by = c("Country.Region" = "Name"))
+
+# Calculate cases and deaths per 100K
+covid_country <- covid_country %>%
+  mutate(
+    Cases = as.numeric(Cases),
+    Deaths = as.numeric(Deaths),
+    Cases_per_100K  = (Cases  / Total.Population) * 1e5,
+    Deaths_per_100K = (Deaths / Total.Population) * 1e5
+  )
+
+str(covid_country)
+```  
+
+### Plot Time Series of Daily New Cases Per 100K (Top 10 Countries by Avg Daily Incidence), Cumulative Cases Per 100K, Daily New Deaths Per 100K, and Cumulative Deaths Per 100K
+```{r}
+# Derive daily new cases and deaths (once)
+covid_country <- covid_country %>%
+  arrange(Country.Region, Date) %>%
+  group_by(Country.Region) %>%
+  mutate(
+    Daily_Cases  = Cases  - lag(Cases),
+    Daily_Deaths = Deaths - lag(Deaths),
+    Daily_Cases  = ifelse(Daily_Cases  < 0, NA, Daily_Cases),
+    Daily_Deaths = ifelse(Daily_Deaths < 0, NA, Daily_Deaths),
+    Daily_Cases_per_100K  = (Daily_Cases  / Total.Population) * 1e5,
+    Daily_Deaths_per_100K = (Daily_Deaths / Total.Population) * 1e5
+  ) %>%
+  ungroup()
+
+# --- Daily incidence ranking (unchanged) ---
+avg_incidence <- covid_country %>%
+  group_by(Country.Region) %>%
+  summarise(Avg_Daily_Cases_per_100K = mean(Daily_Cases_per_100K, na.rm = TRUE),
+            .groups = "drop") %>%
+  slice_max(Avg_Daily_Cases_per_100K, n = 10, with_ties = FALSE)
+
+top_inc_countries <- avg_incidence$Country.Region
+covid_top_daily_cases <- covid_country %>% filter(Country.Region %in% top_inc_countries)
+
+# --- Cumulative cases ranking (NEW) ---
+latest_date <- max(covid_country$Date, na.rm = TRUE)
+
+cum_cases_rank <- covid_country %>%
+  filter(Date == latest_date) %>%
+  arrange(desc(Cases_per_100K)) %>%
+  slice_head(n = 10)
+
+top_cum_case_countries <- cum_cases_rank$Country.Region
+covid_top_cum_cases <- covid_country %>% filter(Country.Region %in% top_cum_case_countries)
+
+# --- Daily cases plot (avg daily incidence rank) ---
+ggplot(covid_top_daily_cases, aes(Date, Daily_Cases_per_100K, color = Country.Region)) +
+  geom_line(alpha = 0.6) +
+  labs(title = "Daily New Cases per 100K\nTop 10 Countries by Avg Daily Incidence",
+       x = "Date", y = "Daily New Cases per 100K", color = "Country") +
+  theme_minimal()
+
+# --- Cumulative cases plot (final burden rank) ---
+ggplot(covid_top_cum_cases, aes(Date, Cases_per_100K, color = Country.Region)) +
   geom_line() +
-  geom_point() +
-  labs(title="Total Shootings per Year", x="Year", y="Total Shootings")
+  labs(title = paste0("Cumulative Cases per 100K (as of ", latest_date, ")\nTop 10 Countries by Final Cumulative Burden"),
+       x = "Date", y = "Cumulative Cases per 100K", color = "Country") +
+  theme_minimal()
+
+# --- Daily death incidence ranking (avg daily incidence rank) ---
+avg_deaths <- covid_country %>%
+  group_by(Country.Region) %>%
+  summarise(Avg_Daily_Deaths_per_100K = mean(Daily_Deaths_per_100K, na.rm = TRUE),
+            .groups = "drop") %>%
+  slice_max(Avg_Daily_Deaths_per_100K, n = 10, with_ties = FALSE)
+
+top_death_countries_daily <- avg_deaths$Country.Region
+covid_top_daily_deaths <- covid_country %>% filter(Country.Region %in% top_death_countries_daily)
+
+# --- Cumulative deaths ranking (final burden rank) ---
+cum_deaths_rank <- covid_country %>%
+  filter(Date == latest_date) %>%
+  arrange(desc(Deaths_per_100K)) %>%
+  slice_head(n = 10)
+
+top_cum_death_countries <- cum_deaths_rank$Country.Region
+covid_top_cum_deaths <- covid_country %>% filter(Country.Region %in% top_cum_death_countries)
+
+# --- Daily deaths plot (avg daily death incidence rank) ---
+ggplot(covid_top_daily_deaths, aes(Date, Daily_Deaths_per_100K, color = Country.Region)) +
+  geom_line(alpha = 0.7) +
+  labs(title = "Daily New Deaths per 100K\nTop 10 Countries by Avg Daily Death Incidence",
+       x = "Date", y = "Daily New Deaths per 100K", color = "Country") +
+  theme_minimal()
+
+# --- Cumulative deaths plot (final burden rank) ---
+ggplot(covid_top_cum_deaths, aes(Date, Deaths_per_100K, color = Country.Region)) +
+  geom_line() +
+  labs(title = paste0("Cumulative Deaths per 100K (as of ", latest_date, ")\nTop 10 Countries by Final Cumulative Burden"),
+       x = "Date", y = "Cumulative Deaths per 100K", color = "Country") +
+  theme_minimal()
 ```
+
+### Notes on time series plots:
+
+  The new Daily cases per 100k plot illustrates the waves of new cases surging with the pandemic. The top 10 countries were shown by average new daily incidence. The daily new deaths per 100k plot illustrates the new deaths per 100k surging with the pandemic.
+  The top 10 countries displayed were also ranked by average new daily death incidence. 
+  The cumulative cases per 100k plot and cumulative deaths per 100k  plot both illustrate the total burden of cases and deaths normalized by population over the course of the pandemic. The top 10 countries were shown by final cumulative burden, rather than by average daily incidence, as the daily new plots do. 
+  It is interesting to note for both new daily and cumulative cases load, the following countries ranked in the top 10: Andorra, Austria, Brunei, Denmark, France, Iceland, South Korea, Portugal, San Marino, and Slovenia. They indicate the countries hit most rapidly by the pandemic. 
+  Conversely, for both daily and cumulative death load, the following countries ranked in the top 10: Bosnia, Bulgaria, Croatia, Czechia, Hungary, Montenegro, North Macedonia, Peru, Romania, and Slovakia. Although perhaps not as rapidly hit, they had the most significant overall burden. 
+
+
+### Fit an XGBoost Model to Predict Cumulative Deaths per 100K Based on Population Density, Sex Ratio, and Old Age (65+) 
 ```{r}
-# Time series forecast of shootings
-# Prepare data for time series analysis
-yearly_shootings <- shooting_data %>%
-  mutate(year = as.integer(format(OCCUR_DATE, "%Y"))) %>%
-  count(year, name = "total_shootings") %>%
-  arrange(year)
+set.seed(123)
 
-# Create time series
-shooting_ts <- ts(yearly_shootings$total_shootings,
-                  start = min(yearly_shootings$year),
-                  frequency = 1)
+model_data <- covid_country %>%
+  filter(Date == max(Date)) %>%
+  select(Country.Region,
+         Deaths_per_100K,
+         Population.Density..per.sq.km.,
+         Sex.Ratio.of.the.Population,
+         Old.Age..65..) %>%
 
-# Fit ARIMA
-fit <- auto.arima(shooting_ts)
+  # Clean numeric-like character columns (remove non digits/decimal)
+  mutate(across(-c(Country.Region, Deaths_per_100K),
+                ~ gsub("[^0-9.]", "", as.character(.)))) %>%
+  mutate(across(-c(Country.Region, Deaths_per_100K), as.numeric)) %>%
+  filter(if_all(everything(), ~ !is.na(.)))   # drop any remaining NA rows
 
-# Forecast next 5 years
-forecasted <- forecast(fit, h = 5)
+# Log1p transform target for stability
+y <- log1p(model_data$Deaths_per_100K)
 
-# Plot forecast
-autoplot(forecasted) +
-  labs(title = "Forecast of Shootings in NYC",
-       x = "Year",
-       y = "Number of Shootings")
+# Predictor Matrix 
+X <- model_data %>% select(-Country.Region, -Deaths_per_100K)
+
+# Train / test split (80/20)
+n <- nrow(X)
+idx <- sample(seq_len(n), size = floor(0.8 * n))
+X_train <- X[idx, , drop = FALSE]
+X_test  <- X[-idx, , drop = FALSE]
+y_train <- y[idx]
+y_test  <- y[-idx]
+
+dtrain <- xgb.DMatrix(data = as.matrix(X_train), label = y_train)
+dtest  <- xgb.DMatrix(data = as.matrix(X_test),  label = y_test)
+
+params <- list(
+  objective = "reg:squarederror",
+  eval_metric = "rmse",
+  eta = 0.05,
+  max_depth = 4,
+  subsample = 0.8,
+  colsample_bytree = 0.8,
+  min_child_weight = 1
+)
+
+xgb_cv <- xgb.cv(
+  params = params,
+  data = dtrain,
+  nrounds = 1000,
+  nfold = 5,
+  early_stopping_rounds = 30,
+  verbose = 0
+)
+
+best_n <- xgb_cv$best_iteration
+
+xgb_model <- xgb.train(
+  params = params,
+  data = dtrain,
+  nrounds = best_n,
+  watchlist = list(train=dtrain, eval=dtest),
+  verbose = 0
+)
+
+# Predictions (back-transform)
+pred_test_log <- predict(xgb_model, dtest)
+pred_test <- expm1(pred_test_log)
+actual_test <- expm1(y_test)
+
+rmse <- sqrt(mean((pred_test - actual_test)^2))
+mae  <- mean(abs(pred_test - actual_test))
+
+cat("Test RMSE (Deaths_per_100K):", round(rmse, 2), "\n")
+cat("Test MAE  (Deaths_per_100K):", round(mae, 2), "\n")
+
+# SHAP values (use original feature frame)
+# predcontrib returns SHAP values + BIAS (last column)
+shap_mat <- predict(xgb_model, dtrain, predcontrib = TRUE)
+shap_df  <- as.data.frame(shap_mat)
+
+# Remove bias term
+feature_cols <- setdiff(colnames(shap_df), "BIAS")
+
+importance_df <- data.frame(
+  Feature = feature_cols,
+  MeanAbsSHAP = colMeans(abs(shap_df[feature_cols]))
+) %>% arrange(desc(MeanAbsSHAP))
+
+# Plot mean |SHAP|
+ggplot(importance_df, aes(x = reorder(Feature, MeanAbsSHAP), y = MeanAbsSHAP)) +
+  geom_col(fill = "#2c7fb8") +
+  coord_flip() +
+  labs(title = "Mean |SHAP| (XGBoost predcontrib)",
+       x = "Feature",
+       y = "Mean |SHAP| (impact on log1p Deaths_per_100K)") +
+  theme_minimal()
 ```
-### Map Shootings Overall
-```{r}
-# plot shootings on a map using leaflet
-shooting_pts <- shooting_data |>
-  filter(!is.na(Longitude), !is.na(Latitude), Longitude != 0, Latitude != 0)
 
-leaflet(shooting_pts) |>
-  addTiles() |>
-  addCircleMarkers(lng = ~Longitude, lat = ~Latitude,
-                   radius = 3, stroke = FALSE,
-                   fillOpacity = 0.5, color = ~year) 
-```
-### Analyze Racial Distribution of Perpetrators and Victims as well as Combination 
-```{r}
-# check unique values of PERP_RACE column and unique values of VIC_RACE column
-unique(shooting_data$PERP_RACE)
-unique(shooting_data$VIC_RACE)
-```
-```{r}
-# create table to show percentage of shootings by year for racial groups as defined by PERP_RACE column
-# Clean race values (so that NA, empty, and "(null)" are treated as "UNKNOWN")
-shooting_data <- shooting_data %>%
-  mutate(PERP_RACE = ifelse(is.na(PERP_RACE) | PERP_RACE == "" | PERP_RACE == "(null)",
-                            "UNKNOWN", PERP_RACE))
+### Notes on model:
 
-# Compute percentage of shootings by perpetrator race per year
-shooting_percentage <- shooting_data %>%
-  group_by(year, PERP_RACE) %>%
-  summarise(count = n(), .groups = "drop_last") %>%
-  mutate(pct = 100 * count / sum(count)) %>%
-  ungroup() %>%
-  select(year, PERP_RACE, pct) %>%
-  tidyr::pivot_wider(names_from = PERP_RACE,
-                     values_from = pct,
-                     values_fill = 0) %>%
-  arrange(year)
+  An XGBoost model was fit to predict cumulative deaths per 100k by country as of the most recent date in the dataset, based on population density, sex ratio, and the proportion of the population over 65.The main goal of the model was to better understand the relative importance of these predictors on COVID-19 mortality burden.
+  The model has room for improvement, with a test RMSE of 107.72 deaths per 100k and a test MAE of 67.53 deaths per 100k. However, given the wide range of mortality rates across countries, and use of only 3 predictors, this level of error is acceptable for initial exploratory analysis.
+  The results would suggest that proportion of the population over 65 is the most important predictor of COVID-19 mortality burden. 
 
-# Round for display
-shooting_percentage_display <- shooting_percentage %>%
-  mutate(across(-year, ~round(.x, 1)))
 
-# Display as a table
-if (requireNamespace("knitr", quietly = TRUE)) {
-  knitr::kable(shooting_percentage_display,
-               caption = "Percentage of Shootings by Perpetrator Race per Year")
-} else {
-  shooting_percentage_display
-}
-```
-```{r}
-# create table to show percentage of victims by year for racial groups as defined by VIC_RACE column
-# Clean race values (so that NA, empty, and "(null)" are treated as "UNKNOWN")
-shooting_data <- shooting_data %>%
-  mutate(VIC_RACE = ifelse(is.na(VIC_RACE) | VIC_RACE == "" | VIC_RACE == "(null)",
-                            "UNKNOWN", VIC_RACE))
+### Conclusions, Bias, and Next Steps:
 
-# Compute percentage of shootings by victim race per year
-shooting_percentage <- shooting_data %>%
-  group_by(year, VIC_RACE) %>%
-  summarise(count = n(), .groups = "drop_last") %>%
-  mutate(pct = 100 * count / sum(count)) %>%
-  ungroup() %>%
-  select(year, VIC_RACE, pct) %>%
-  tidyr::pivot_wider(names_from = VIC_RACE,
-                     values_from = pct,
-                     values_fill = 0) %>%
-  arrange(year)
-
-# Round for display
-shooting_percentage_display <- shooting_percentage %>%
-  mutate(across(-year, ~round(.x, 1)))
-
-# Display as a table
-if (requireNamespace("knitr", quietly = TRUE)) {
-  knitr::kable(shooting_percentage_display,
-               caption = "Percentage of Shootings by Victim Race per Year")
-} else {
-  shooting_percentage_display
-}
-```
-```{r}
-# Perp-victim matrix: cells are % of ALL shootings (table sums to 100%)
-tot_shootings <- nrow(shooting_data)
-
-shooting_matrix_overall <- shooting_data %>%
-  count(PERP_RACE, VIC_RACE, name = "count") %>%
-  mutate(pct = 100 * count / tot_shootings) %>%
-  select(PERP_RACE, VIC_RACE, pct) %>%
-  tidyr::pivot_wider(names_from = VIC_RACE,
-                     values_from = pct,
-                     values_fill = 0) %>%
-  arrange(PERP_RACE)
-
-# Add a row total (% of all shootings by perpetrator race)
-shooting_matrix_overall <- shooting_matrix_overall %>%
-  mutate(`ROW_TOTAL_%` = round(rowSums(across(-PERP_RACE)), 1))
-
-# Check should be ~100
-grand_total_check <- sum(shooting_matrix_overall$`ROW_TOTAL_%`)
-
-shooting_matrix_overall_display <- shooting_matrix_overall %>%
-  mutate(across(-PERP_RACE, ~round(.x, 2)))
-
-if (requireNamespace("knitr", quietly = TRUE)) {
-  knitr::kable(shooting_matrix_overall_display,
-               caption = paste0("Perp-Victim Race: % of All Shootings (Grand Total ~ ",
-                                round(grand_total_check,1), "%)"))
-} else {
-  shooting_matrix_overall_display
-}
-```
-# Conclusions, Bias, and Next Steps:
-
-The analysis of the NYPD shooting data from 2006 to 2024 reveals several key insights. The amount of shootings was consistently declining through 2018 with a large uptick in 2020. A deeper analysis needs to be conducted on the factors contributing to this trend, however it does coincide with when Covid-19 lockdowns began in NYC.
-The time series forecast model (ARIMA) suggests the number of shootings to rise slightly over the next 5 years, however, the confidence intervals are quite wide, indicating a high level of uncertainty in the predictions. Significantly more time should be spent to evaluate model fit and other potential models.
-The racial distribution of perpetrators and victims shows significant disparities, with certain racial groups being disproportionately represented. There is a significant number of shootings with unknown or unlisted racial group (around 30%-50%). Black and Hispanic individuals are more frequently involved as both perpetrators and victims compared to their population proportions. The analysis of race on race proportion of total shootings suggests that Black on Black and Unknown Race on Black are make up 64% of all shootings from 2006-2024.
-These disparities may reflect underlying social, economic, and systemic issues that need to be addressed. It is important to consider potential biases in the data collection process, such as underreporting or misclassification. Significantly deeper dives into this data are needed to draw more definitive conclusions.
-It may also be of benefit to consider analyst bias in the selection of columns for study. Age group, sex, time of day, precinct, etc. may all have interactive effects that should be considered along with the factors analyzed.
+  This analysis explored global COVID-19 case and death data from Johns Hopkins University, normalized by population data from the US Census Bureau. Time series plots illustrated the waves of new cases and deaths over time, as well as the cumulative burden of the pandemic across countries.
+  An XGBoost model was fit to predict cumulative deaths per 100k based on population density, sex ratio, and the proportion of the population over 65, indicating that proportion of the population over 65 is the most important predictor of COVID-19 mortality burden.
+  As with any analysis of this nature, there are limitations and sources of bias to consider. The population data used from the US Census Bureau were values as of 2025 and not matched in time with the COVID-19 data. Additionally, the COVID-19 data itself is subject to reporting biases and inconsistencies across countries.
+  The time series plots created, open up a variety of avenues for further exploration with an objective of finding similar factors between the top ranking countries. Additionally, the XGBoost model was only fit using 3 factors. Significantly more time and effort should be put into it to generate more robust results. 
+  The initial selection of predictors represents the bias of the analyst, and other important predictors may have been overlooked. Further feature engineering and selection should be performed to identify the most relevant predictors of COVID-19 mortality burden.
