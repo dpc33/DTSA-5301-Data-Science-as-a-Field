@@ -15,12 +15,12 @@ date: "9/11/2025"
 library(dplyr)
 library(tidyr)
 library(ggplot2)
-library(leaflet) 
+library(leaflet)
 library(forecast)
 ```
 ### Read Data and Check Summary
 ```{r}
-# read in data 
+# read in data
 shooting_data = read.csv("https://data.cityofnewyork.us/api/views/833y-fsy8/rows.csv?accessType=DOWNLOAD")
 head(shooting_data)
 summary(shooting_data)
@@ -83,15 +83,85 @@ autoplot(forecasted) +
 ```
 ### Map Shootings Overall
 ```{r}
-# plot shootings on a map using leaflet
+# Plot individual shooting locations colored by Borough; toggle layers by Year
 shooting_pts <- shooting_data |>
-  filter(!is.na(Longitude), !is.na(Latitude), Longitude != 0, Latitude != 0)
+  # Clean column names to snake_case locally for style compliance
+  rename_with(~ tolower(gsub("\\s+", "_", .x))) |>
+  # Filter valid coordinate and key fields
+  filter(
+    !is.na(longitude), !is.na(latitude),
+    longitude != 0, latitude != 0,
+    !is.na(boro), !is.na(occur_date)
+  ) |>
+  mutate(
+    occur_date = as.Date(occur_date),
+    year = format(occur_date, "%Y"),
+    boro = trimws(boro)
+  )
 
-leaflet(shooting_pts) |>
-  addTiles() |>
-  addCircleMarkers(lng = ~Longitude, lat = ~Latitude,
-                   radius = 3, stroke = FALSE,
-                   fillOpacity = 0.5, color = ~year) 
+# Define a consistent color set for boroughs
+boro_colors <- c(
+  "BRONX" = "#1f78b4",
+  "BROOKLYN" = "#33a02c",
+  "MANHATTAN" = "#e31a1c",
+  "QUEENS" = "#ff7f00",
+  "STATEN ISLAND" = "#6a3d9a",
+  "UNKNOWN" = "#b15928"
+)
+
+present_boros <- sort(unique(toupper(shooting_pts$boro)))
+# Re-map cleaned boro values to uppercase keys in palette if needed
+shooting_pts <- shooting_pts |>
+  mutate(boro = toupper(boro))
+
+boro_pal <- colorFactor(
+  palette = boro_colors[present_boros],
+  domain = present_boros
+)
+
+years <- sort(unique(shooting_pts$year))
+
+m <- leaflet() |>
+  addTiles()
+
+for (y in years) {
+  df <- dplyr::filter(shooting_pts, year == y)
+  m <- m |>
+    addCircleMarkers(
+      data = df,
+      lng = ~longitude,
+      lat = ~latitude,
+      radius = 4,
+      stroke = FALSE,
+      fillOpacity = 0.5,
+      color = ~boro_pal(boro),
+      group = y,
+      label = ~paste0(
+        "Year: ", year,
+        "\nBorough: ", boro
+      ),
+      popup = ~paste0(
+        "<b>Year:</b> ", year, "<br>",
+        "<b>Borough:</b> ", boro, "<br>",
+        "<b>Date:</b> ", format(occur_date, "%Y-%m-%d")
+      )
+    )
+}
+
+m <- m |>
+  addLayersControl(
+    overlayGroups = years,
+    options = layersControlOptions(collapsed = FALSE)
+  ) |>
+  addLegend(
+    position = "bottomright",
+    pal = boro_pal,
+    values = present_boros,
+    title = "Borough",
+    opacity = 1
+  )
+
+m
 ```
 ### Analyze Racial Distribution of Perpetrators and Victims as well as Combination 
 ```{r}
